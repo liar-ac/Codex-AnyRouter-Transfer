@@ -1,7 +1,9 @@
 ﻿import asyncio
+import dataclasses
 import json
 import os
 import queue
+import re
 import socket
 import sys
 import threading
@@ -23,9 +25,10 @@ from PIL import Image, ImageDraw
 
 
 APP_NAME = "Codex AnyRouter 转发器"
+APP_VERSION = "1.1.0"
 APP_DIR = Path(os.getenv("APPDATA", str(Path.home()))) / "codex-anyroute"
 CONFIG_PATH = APP_DIR / "config.json"
-LOG_PATH = APP_DIR / "logs" / f"proxy-{time.strftime('%Y-%m-%d')}.log"
+LOG_DIR = APP_DIR / "logs"
 DEFAULT_GATEWAY_KEY = "codex-anyroute-local"
 DEFAULT_LISTEN_PORT = 18180
 SINGLE_INSTANCE_MUTEX_NAME = "Local\\CodexAnyRouteTransfer"
@@ -53,13 +56,17 @@ UPSTREAM_RETRY_ATTEMPTS = 3
 UPSTREAM_RETRY_BASE_DELAY = 1.5
 MIN_RESPONSES_OUTPUT_TOKENS = 4096
 # Models that AnyRouter serves natively on /v1/responses. For these we just
-# pass through the Codex request — no translation needed.
-PASSTHROUGH_MODELS_PREFIXES = ("gpt-", "o1", "o3", "o4")
+# pass through the Codex request — no translation needed. The pattern is
+# anchored so unrelated names that happen to start with a single letter (e.g.
+# a hypothetical "o1xxx-other-vendor") don't accidentally match: an "o" name
+# must be a single digit followed by a dash, end-of-string, or a digit-suffix
+# variant we know about (o1-mini, o3-pro, o4-mini, ...).
+PASSTHROUGH_MODELS_PATTERN = re.compile(r"^(gpt-|o[1-9](?:$|-|\d))")
 
 
 def ensure_dirs() -> None:
     APP_DIR.mkdir(parents=True, exist_ok=True)
-    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def now() -> str:
@@ -174,18 +181,100 @@ class AppConfig:
 
 
 class LogBus:
+    """
+    Three-way fan-out for log lines: GUI (Tk drains ``ui_queue`` every 300 ms),
+    disk (a background daemon flushes ``disk_queue`` to today's log file), and
+    nothing else — we deliberately keep network/telemetry out.
+
+    Disk IO used to happen synchronously inside ``write()`` which is called
+    from the asyncio event loop on every SSE event. That blocked the loop on
+    each log line. Now ``write()`` is non-blocking: it only enqueues, and the
+    daemon thread does the file IO. Queues are bounded to keep memory flat
+    when the GUI is paused or the disk is slow.
+    """
+
+    UI_QUEUE_LIMIT = 5000
+    DISK_QUEUE_LIMIT = 5000
+
     def __init__(self) -> None:
-        self.lines: "queue.Queue[str]" = queue.Queue()
+        self.ui_queue: "queue.Queue[str]" = queue.Queue(maxsize=self.UI_QUEUE_LIMIT)
+        self._disk_queue: "queue.Queue[Optional[str]]" = queue.Queue(maxsize=self.DISK_QUEUE_LIMIT)
+        self._writer_thread = threading.Thread(target=self._writer_loop, daemon=True, name="codex-anyroute-log")
+        self._writer_thread.start()
+
+    # Back-compat alias for callers using ``log_bus.lines.get_nowait()``.
+    @property
+    def lines(self) -> "queue.Queue[str]":
+        return self.ui_queue
 
     def write(self, level: str, message: str) -> None:
-        ensure_dirs()
         line = f"{now()}  {level:<7} {message}"
-        self.lines.put(line)
+        # GUI queue: drop oldest if full so the newest line still shows.
         try:
-            with LOG_PATH.open("a", encoding="utf-8") as f:
-                f.write(line + "\n")
-        except Exception:
-            pass
+            self.ui_queue.put_nowait(line)
+        except queue.Full:
+            try:
+                self.ui_queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self.ui_queue.put_nowait(line)
+            except queue.Full:
+                pass
+        # Disk queue: same drop-oldest policy.
+        try:
+            self._disk_queue.put_nowait(line)
+        except queue.Full:
+            try:
+                self._disk_queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._disk_queue.put_nowait(line)
+            except queue.Full:
+                pass
+
+    def _writer_loop(self) -> None:
+        """Flush disk_queue → today's log file. Reopens daily so the path
+        rolls over at midnight without a restart."""
+        current_date = ""
+        handle = None
+        try:
+            while True:
+                item = self._disk_queue.get()
+                if item is None:
+                    break
+                today = time.strftime("%Y-%m-%d")
+                if today != current_date or handle is None:
+                    if handle is not None:
+                        try:
+                            handle.close()
+                        except Exception:
+                            pass
+                    try:
+                        ensure_dirs()
+                        path = LOG_DIR / f"proxy-{today}.log"
+                        handle = path.open("a", encoding="utf-8")
+                        current_date = today
+                    except Exception:
+                        handle = None
+                        current_date = today
+                if handle is not None:
+                    try:
+                        handle.write(item + "\n")
+                        handle.flush()
+                    except Exception:
+                        try:
+                            handle.close()
+                        except Exception:
+                            pass
+                        handle = None
+        finally:
+            if handle is not None:
+                try:
+                    handle.close()
+                except Exception:
+                    pass
 
 
 log_bus = LogBus()
@@ -213,7 +302,7 @@ def is_passthrough_model(model: str) -> bool:
     m = (model or "").lower().strip()
     if not m:
         return False
-    return any(m.startswith(p) for p in PASSTHROUGH_MODELS_PREFIXES)
+    return PASSTHROUGH_MODELS_PATTERN.match(m) is not None
 
 
 def sanitize_responses_body_for_anyrouter(body: Dict[str, Any], *, drop_all_tools: bool = False) -> Tuple[Dict[str, Any], str]:
@@ -297,13 +386,24 @@ def sanitize_responses_body_for_anyrouter(body: Dict[str, Any], *, drop_all_tool
 
 
 def anyrouter_tool_schema_error(message: str) -> bool:
+    """
+    Return True if the upstream error looks like a tools-schema rejection from
+    AnyRouter's compatibility layer. We use this to decide whether to retry
+    the same model with tools stripped. Patterns are intentionally specific:
+    "tools[" / "tool_choice" name the field, while the looser
+    `<keyword> + tool` checks require a parameter-shaped phrasing so that
+    plain model-availability errors that happen to mention a tool don't
+    accidentally trigger a redundant retry.
+    """
     raw = message or ""
     low = raw.lower()
+    if "tools[" in raw or "tool_choice" in low:
+        return True
     return (
-        "tools[" in raw
-        or "missing required parameter" in low and "tool" in low
-        or "unknown parameter" in low and "tool" in low
-        or "invalid" in low and "tool" in low
+        ("missing required parameter" in low and "tool" in low)
+        or ("unknown parameter" in low and "tool" in low)
+        or ("invalid parameter" in low and "tool" in low)
+        or ("invalid value for" in low and "tool" in low)
     )
 
 
@@ -346,12 +446,18 @@ config = AppConfig.load()
 
 
 def check_gateway_auth(request: Request, cfg: AppConfig) -> bool:
-    auth = request.headers.get("authorization", "")
+    """
+    Verify the local gateway key. Fail-closed: when ``gateway_key`` is set,
+    the request MUST present a matching ``Authorization: Bearer <key>``
+    header. Missing or non-bearer auth is rejected so other local processes
+    can't reach AnyRouter through 127.0.0.1 without the configured token.
+    """
     if not cfg.gateway_key:
         return True
-    if auth.lower().startswith("bearer "):
-        return auth.split(" ", 1)[1] == cfg.gateway_key
-    return True
+    auth = request.headers.get("authorization", "")
+    if not auth.lower().startswith("bearer "):
+        return False
+    return auth.split(" ", 1)[1] == cfg.gateway_key
 
 
 def sse(event: str, data: Dict[str, Any]) -> bytes:
@@ -1266,7 +1372,7 @@ async def stream_passthrough(body: Dict[str, Any], cfg: AppConfig) -> AsyncGener
 
 @app.get("/")
 async def root() -> Dict[str, str]:
-    return {"name": APP_NAME, "status": "ok"}
+    return {"name": APP_NAME, "version": APP_VERSION, "status": "ok"}
 
 
 @app.get("/v1/models")
@@ -1282,7 +1388,7 @@ async def models() -> Dict[str, Any]:
 @app.post("/responses")
 async def responses(request: Request) -> Response:
     with config_lock:
-        cfg = AppConfig(**config.__dict__)
+        cfg = dataclasses.replace(config)
     if not check_gateway_auth(request, cfg):
         return JSONResponse({"error": {"message": "invalid gateway key"}}, status_code=401)
     body = strip_unverifiable_encrypted_content(await request.json())
@@ -1299,6 +1405,10 @@ async def responses(request: Request) -> Response:
 @app.post("/v1/chat/completions")
 @app.post("/chat/completions")
 async def chat_completions(request: Request) -> Response:
+    with config_lock:
+        cfg = dataclasses.replace(config)
+    if not check_gateway_auth(request, cfg):
+        return JSONResponse({"error": {"message": "invalid gateway key"}}, status_code=401)
     body = await request.json()
     messages = body.get("messages", [])
     responses_body = {
@@ -1306,8 +1416,6 @@ async def chat_completions(request: Request) -> Response:
         "stream": bool(body.get("stream", True)),
         "input": [{"type": "message", "role": m.get("role", "user"), "content": m.get("content", "")} for m in messages if isinstance(m, dict)],
     }
-    with config_lock:
-        cfg = AppConfig(**config.__dict__)
     return StreamingResponse(stream_responses(responses_body, cfg), media_type="text/event-stream")
 
 
@@ -1319,7 +1427,7 @@ def is_port_in_use(port: int) -> bool:
 
 def start_server() -> None:
     with config_lock:
-        cfg = AppConfig(**config.__dict__)
+        cfg = dataclasses.replace(config)
         port = int(cfg.listen_port)
     if server_holder.get("server"):
         log_bus.write("INFO", "转发服务已经在运行")
@@ -2198,6 +2306,32 @@ def ensure_codex_anyroute_config(cfg: AppConfig, reason: str = "") -> None:
     write_codex_config(cfg)
 
 
+def _codex_state_fingerprint() -> Tuple[Tuple[int, int], ...]:
+    """
+    Cheap fingerprint of the Codex state files we manage. The guard thread
+    skips the full ``ensure_codex_anyroute_config`` pass when this hasn't
+    changed, which keeps disk traffic flat (and prevents the guard from
+    fighting an external editor mid-write).
+    """
+    codex_dir = Path.home() / ".codex"
+    targets = [
+        codex_dir / "config.toml",
+        codex_dir / "auth.json",
+        codex_dir / "state_5.sqlite",
+        codex_dir / ".codex-global-state.json",
+    ]
+    out: List[Tuple[int, int]] = []
+    for target in targets:
+        try:
+            stat = target.stat()
+            out.append((int(stat.st_mtime_ns), int(stat.st_size)))
+        except FileNotFoundError:
+            out.append((0, 0))
+        except Exception:
+            out.append((-1, -1))
+    return tuple(out)
+
+
 def _start_codex_config_guard() -> None:
     stop_event = server_holder.get("guard_stop")
     if isinstance(stop_event, threading.Event) and not stop_event.is_set():
@@ -2206,17 +2340,36 @@ def _start_codex_config_guard() -> None:
     stop_event = threading.Event()
     server_holder["guard_stop"] = stop_event
 
+    # Tick interval: 30s (was 3s). Combined with the fingerprint check below,
+    # this stops the guard from re-reading ~/.codex/* a few hundred times per
+    # minute while the user is just chatting in Codex. The faster cadence
+    # never bought us anything in practice — config drift only happens after
+    # an explicit Codex action (login / setting toggle / version upgrade).
+    GUARD_INTERVAL_SECONDS = 30.0
+
     def guard() -> None:
-        while not stop_event.wait(3.0):
+        last_fingerprint: Optional[Tuple[Tuple[int, int], ...]] = None
+        while not stop_event.wait(GUARD_INTERVAL_SECONDS):
+            try:
+                fingerprint = _codex_state_fingerprint()
+            except Exception:
+                fingerprint = None
+            if fingerprint is not None and fingerprint == last_fingerprint:
+                continue
             with config_lock:
-                cfg = AppConfig(**config.__dict__)
+                cfg = dataclasses.replace(config)
             try:
                 if cfg.codex_auto_apply:
                     ensure_codex_anyroute_config(cfg, "守护检查")
                 else:
                     sync_codex_history_for_current_mode(cfg, "守护检查")
+                last_fingerprint = fingerprint
             except Exception as e:
                 log_bus.write("WARN", f"Codex 配置守护检查失败：{e}")
+                # On error, drop the cached fingerprint so the next tick
+                # always retries instead of getting stuck believing the
+                # files are healthy.
+                last_fingerprint = None
 
     thread = threading.Thread(target=guard, daemon=True)
     server_holder["guard_thread"] = thread
@@ -4128,7 +4281,7 @@ class MainWindow:
             config.codex_auto_apply = True
             config.save()
             self.codex_auto_apply_var.set(True)
-            cfg = AppConfig(**config.__dict__)
+            cfg = dataclasses.replace(config)
         write_codex_config(cfg)
         _start_codex_config_guard()
         self._flash_action("✓ Codex 配置已写入 ~/.codex/", success=True)
@@ -4199,7 +4352,7 @@ class MainWindow:
 
         def worker() -> None:
             with config_lock:
-                cfg = AppConfig(**config.__dict__)
+                cfg = dataclasses.replace(config)
             try:
                 items = diagnose_codex_setup(cfg)
             except Exception as e:
@@ -4255,7 +4408,7 @@ class MainWindow:
 
         def worker() -> None:
             with config_lock:
-                cfg = AppConfig(**config.__dict__)
+                cfg = dataclasses.replace(config)
             try:
                 results: List[str] = []
                 ordered: List[Tuple[str, str]] = [("第一模型", cfg.default_model)]

@@ -11,6 +11,7 @@
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-22c55e)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows-4493f8)](#)
+[![Release](https://img.shields.io/badge/release-v1.1.0-4493f8)](https://github.com/liar-ac/Codex-AnyRouter-Transfer/releases/latest)
 
 </div>
 
@@ -22,7 +23,7 @@
 
 > **📦 [CodexAnyRoute.exe - 点击下载最新 Release](https://github.com/liar-ac/Codex-AnyRouter-Transfer/releases/latest)**
 >
-> 支持 Windows x64 · 单文件 · 无需安装 · 约 **~17 MB**
+> 支持 Windows x64 · 单文件 · 无需安装 · 约 **~16.7 MB**（v1.1.0 启用 UPX 压缩）
 
 ---
 
@@ -58,7 +59,7 @@
 
 ### 方式一：直接运行 EXE（推荐）
 
-从 [Release 页面](https://github.com/liar-ac/Codex-AnyRouter-Transfer/releases/latest) 下载 `CodexAnyRoute.exe`，双击运行即可。约 **~17 MB**，单文件、绿色版。
+从 [Release 页面](https://github.com/liar-ac/Codex-AnyRouter-Transfer/releases/latest) 下载 `CodexAnyRoute.exe`，双击运行即可。约 **~16.7 MB**，单文件、绿色版。
 
 ### 方式二：从源码运行
 
@@ -75,8 +76,10 @@ py -3.12 -m venv .venv
 
 ```powershell
 .\build.ps1
-# 产物：dist\CodexAnyRoute.exe（~17 MB）
+# 产物：dist\CodexAnyRoute.exe（~16.7 MB，启用 UPX 后）
 ```
+
+> 想要进一步压体积，可以先 `winget install UPX.UPX` 装上 UPX，再跑 `build.ps1`——脚本会自动检测并启用 UPX。如果没装也不影响构建，只是体积会大几 MB。
 
 如果想要带控制台输出的调试构建：
 
@@ -132,9 +135,32 @@ experimental_bearer_token = "<local-gateway-key>"
 
 ## 🛡️ 隐私与安全
 
-- 你的 API 凭证始终保存在本地，不会被上传到任何服务器。
+- 你的 API 凭证始终保存在本地 `%APPDATA%\codex-anyroute\config.json`（明文 JSON）。**不要把这个文件分享给别人。**
 - 运行日志仅存储于本机 `%APPDATA%\codex-anyroute\logs`，不会上传任何遥测数据。
 - 写入 Codex 的 `experimental_bearer_token` 仅用于本地网关通信，不会流向 AnyRouter 或其他第三方。
+- 本地网关默认开启 Bearer Token 校验，缺失或错误的 Bearer 头会被 **fail-closed 拒绝**（v1.1.0+），防止本机其它进程绕开网关 Key 直接转发请求。
+
+## 🔄 版本变更
+
+### v1.1.0（2026-05）
+
+**安全性 / 健壮性专项**
+
+- 🔐 **网关鉴权改为 fail-closed**：`/v1/responses` 与 `/v1/chat/completions` 缺失或错误的 `Authorization: Bearer` 头会返回 401。原先两条路径在没有鉴权头时会直接放行。
+- 🔐 `/v1/chat/completions` 补齐网关鉴权（之前完全没校验）。
+- 🩹 **修复 v1.0.0 打包后转发服务起不来**：`h11` 被错误地放进 PyInstaller `EXCLUDES`，但它是 httpx 的硬依赖，会导致运行时 `ModuleNotFoundError: No module named 'h11'`。
+- ⚡ **PyInstaller 打包启用 UPX**：`build.ps1` 检测 UPX 后会真正生效。原 spec 写死 `upx=False`，构建脚本里的 UPX 检测是死代码。
+- ⚡ **日志写入异步化**：原来 `LogBus.write` 每条日志都同步打开/关闭文件，挂在 asyncio 事件循环上；改成后台线程消费 + 队列上限 5000 条 + 跨日自动切换文件。
+- 🛡️ `anyrouter_tool_schema_error` 修复运算符优先级，不再把所有"含 invalid + tool"的错误都误判成 tools schema 问题。
+- 🛡️ `is_passthrough_model` 用正则锚定，`o1` / `o3` / `o4` 不再误匹配 `omfg-xxx`。
+- 🛡️ Codex 配置守护线程：3s → 30s + mtime 指纹去重，磁盘 IO 降低一个数量级，且不再和外部编辑器抢写。
+- 🧹 `dataclasses.replace(config)` 代替 `AppConfig(**config.__dict__)`，避免后续给 AppConfig 加字段时打包克隆出 bug。
+- 🩹 日志文件路径过午夜后会按当天日期切换（之前要重启进程才会换文件）。
+- ✨ `GET /` 返回里加 `version` 字段方便排查版本错位。
+
+### v1.0.0
+
+首发版本：本地 Responses 入口、AnyRouter 上游、模型映射与三档优先级、Codex 配置一键写入 / 还原、Plus/API 聊天记录互通、单实例 + 系统托盘。
 
 ## ❓ 常见问题
 

@@ -27,7 +27,10 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    upx_exclude=[],
+    upx_exclude=[
+        'api-ms-win-*.dll',
+        'ucrtbase.dll',
+    ],
     runtime_tmpdir=None,
     console=True,
     disable_windowed_traceback=False,

@@ -44,8 +44,6 @@ EXCLUDES = [
     'notebook',
     'sympy',
     'pandas.errors',
-    # Optional httpx backends not used in our sync test path
-    'h11',
     # Optional uvicorn anyio backends (Windows uses default asyncio loop)
     'uvloop',
     'winloop',
@@ -80,8 +78,19 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=True,
-    upx=False,
-    upx_exclude=[],
+    # UPX is opportunistically enabled. build.ps1 detects upx.exe and passes
+    # --upx-dir; if UPX isn't on the system PyInstaller silently skips it.
+    # Excludes below cover binaries that UPX is known to break on Windows
+    # (CRT redistributables / Windows API set forwarders / Tcl-Tk runtime).
+    upx=True,
+    # Only exclude binaries where UPX is empirically known to break things on
+    # Windows (Windows API set forwarders + ucrtbase). Python / VCRuntime /
+    # Tcl-Tk all pack and run fine, and that's where most of the savings
+    # come from.
+    upx_exclude=[
+        'api-ms-win-*.dll',
+        'ucrtbase.dll',
+    ],
     runtime_tmpdir=None,
     console=False,
     disable_windowed_traceback=False,
