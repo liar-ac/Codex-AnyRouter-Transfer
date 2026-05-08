@@ -16,6 +16,16 @@
 
 ---
 
+## ⬇️ 下载即用（推荐）
+
+直接下载 Release 中的单文件 EXE，**双击即可运行**，无需安装 Python 或配置环境：
+
+> **📦 [CodexAnyRoute.exe - 点击下载最新 Release](https://github.com/liar-ac/Codex-AnyRouter-Transfer/releases/latest)**
+>
+> 支持 Windows x64 · 单文件 · 无需安装 · 约 **~15 MB**
+
+---
+
 ## ✨ 主要特性
 
 - **本地 OpenAI Responses 兼容入口** — `http://127.0.0.1:18180/v1`，Codex 桌面端 / Codex CLI 都可以直接指向。
@@ -46,6 +56,12 @@
 
 > 仅在 Windows + Python 3.12 测试过。其它平台理论可跑，但 PyInstaller 打包脚本是 PowerShell。
 
+### 方式一：直接运行 EXE（推荐）
+
+从 [Release 页面](https://github.com/liar-ac/Codex-AnyRouter-Transfer/releases/latest) 下载 `CodexAnyRoute.exe`，双击运行即可。约 **~15 MB**，单文件、绿色版。
+
+### 方式二：从源码运行
+
 ```powershell
 # 1. 创建虚拟环境并安装依赖
 py -3.12 -m venv .venv
@@ -55,11 +71,11 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe app.py
 ```
 
-打包成单文件 EXE：
+### 方式三：自己打包 EXE
 
 ```powershell
 .\build.ps1
-# 产物：dist\CodexAnyRoute.exe
+# 产物：dist\CodexAnyRoute.exe（~15 MB）
 ```
 
 如果想要带控制台输出的调试构建：
