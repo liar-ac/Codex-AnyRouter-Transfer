@@ -58,7 +58,7 @@
 
 ### 方式一：直接运行 EXE（推荐）
 
-从 [Release 页面](https://github.com/liar-ac/Codex-AnyRouter-Transfer/releases/latest) 下载 `CodexAnyRoute.exe`，双击运行即可。约 **~15 MB**，单文件、绿色版。
+从 [Release 页面](https://github.com/liar-ac/Codex-AnyRouter-Transfer/releases/latest) 下载 `CodexAnyRoute.exe`，双击运行即可。约 **~17 MB**，单文件、绿色版。
 
 ### 方式二：从源码运行
 
@@ -132,9 +132,9 @@ experimental_bearer_token = "<local-gateway-key>"
 
 ## 🛡️ 隐私与安全
 
-- API Key 只保存在本机 `config.json`，不会进入 git 仓库（`.gitignore` 已显式排除）。
-- 写入 Codex 的 `experimental_bearer_token` 是本地网关 Key，仅用于 Codex 访问 `127.0.0.1`，不会发到 AnyRouter。
-- 运行日志会脱敏写入文件；不会上传任何遥测。
+- 你的 API 凭证始终保存在本地，不会被上传到任何服务器。
+- 运行日志仅存储于本机 `%APPDATA%\codex-anyroute\logs`，不会上传任何遥测数据。
+- 写入 Codex 的 `experimental_bearer_token` 仅用于本地网关通信，不会流向 AnyRouter 或其他第三方。
 
 ## ❓ 常见问题
 
