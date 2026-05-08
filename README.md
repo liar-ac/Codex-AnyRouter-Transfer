@@ -22,7 +22,7 @@
 
 > **📦 [CodexAnyRoute.exe - 点击下载最新 Release](https://github.com/liar-ac/Codex-AnyRouter-Transfer/releases/latest)**
 >
-> 支持 Windows x64 · 单文件 · 无需安装 · 约 **~15 MB**
+> 支持 Windows x64 · 单文件 · 无需安装 · 约 **~17 MB**
 
 ---
 
@@ -75,7 +75,7 @@ py -3.12 -m venv .venv
 
 ```powershell
 .\build.ps1
-# 产物：dist\CodexAnyRoute.exe（~15 MB）
+# 产物：dist\CodexAnyRoute.exe（~17 MB）
 ```
 
 如果想要带控制台输出的调试构建：
