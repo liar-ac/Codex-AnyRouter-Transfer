@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+env/
+
+# Build output
+build/
+build-venv/
+dist/
+*.spec.bak
+
+# Local runtime data
+.claude/
+.firecrawl/
+tmp_codex_home*/
+*.log
+*.err
+*.out
+
+# Debug captures
+claude-captured*.json
+capture_*.py
+*-capture-debug.log
+*-debug.log
+
+# Editor and OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env
+.env.*
+config.json
